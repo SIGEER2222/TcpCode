@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="BeetleX" Version="1.8.0.3" />
+  </ItemGroup>
+  	
+	<ItemGroup>
+		<PackageReference Include="Serilog" Version="*" />
+		<PackageReference Include="Serilog.Sinks.Console" Version="*" />
+		<PackageReference Include="Serilog.Sinks.File" Version="*" />
+		<PackageReference Include="Serilog.Sinks.Debug" Version="*" />
+		<PackageReference Include="System.Reactive" Version="6.0.1" />
+		<PackageReference Include="System.Reactive.Linq" Version="6.0.1" />
+	</ItemGroup>
+
+</Project>
