@@ -18,18 +18,6 @@ public class DispensingMachine //点胶机
 }
 
 public class DataProcessor {
-  // 尝试自动判断数据格式并处理
-  public static void ProcessData(string inputData) {
-    // 尝试解析为JSON格式
-    if (IsJsonFormat(inputData)) {
-      ProcessJsonData(inputData);
-    }
-    else {
-      // 不是JSON格式，按文本格式处理
-      ProcessTextFormat(inputData);
-    }
-  }
-
   // 判断是否为JSON格式
   public static bool IsJsonFormat(string data) {
     data = data.Trim();

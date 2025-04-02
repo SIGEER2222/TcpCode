@@ -5,7 +5,7 @@ using System.Text.Json;
 using System.Threading.Tasks;
 using Serilog;
 
-public class HttpHelper {
+public static class HttpHelper {
   private static readonly HttpClient _client = new HttpClient();
   private static readonly JsonSerializerOptions _jsonOptions = new JsonSerializerOptions {
     PropertyNamingPolicy = JsonNamingPolicy.CamelCase, // 使用驼峰命名
@@ -46,46 +46,40 @@ public class HttpHelper {
       return $"请求失败: {ex.Message}";
     }
   }
-
 }
 
 /// <summary>
 /// 作业请求服务
 /// </summary>
-public class EapJobService {
-  private readonly string _jobInUrl;
-  private readonly string _jobOutUrl;
+public static class EapJobService {
+  private static readonly string _jobInUrl = "http://10.10.4.203:31000/operation/api/app/eap-operation/e-aP_Job-prep_Job-in_Check";
+  private static readonly string _jobOutUrl = "http://10.10.4.203:31000/operation/api/app/eap-operation/e-aP_Job-prep_Job-out_Check";
 
-  public EapJobService(string jobInUrl, string jobOutUrl) {
-    _jobInUrl = jobInUrl;
-    _jobOutUrl = jobOutUrl;
-  }
-  public EapJobService() {
-    _jobInUrl = "http://10.10.8.59:8080/api/app/eap-operation/e-aP_Job-prep_Job-in_Check";
-    _jobOutUrl = "http://10.10.8.59:8080/api/app/eap-operation/e-aP_Job-prep_Job-out_Check";
-
-    _jobInUrl = "http://10.10.4.203:31000/operation/api/app/eap-operation/e-aP_Job-prep_Job-in_Check";
-    _jobOutUrl = "http://10.10.4.203:31000/operation/api/app/eap-operation/e-aP_Job-prep_Job-out_Check";
+  public static async Task<string> SendJobInRequestAsync(string eqpName, string carrierName) {
+    return await SendJobRequestAsync(_jobInUrl, "SYSTEM", eqpName, carrierName);
   }
 
+  public static async Task<string> SendJobOutRequestAsync(string eqpName, string carrierName) {
+    return await SendJobRequestAsync(_jobOutUrl, "SYSTEM", eqpName, carrierName);
+  }
   /// <summary>
   /// 发送 Job In 请求
   /// </summary>
-  public async Task<string> SendJobInRequestAsync(string userName, string eqpName, string carrierName) {
+  public static async Task<string> SendJobInRequestAsync(string userName, string eqpName, string carrierName) {
     return await SendJobRequestAsync(_jobInUrl, userName, eqpName, carrierName);
   }
 
   /// <summary>
   /// 发送 Job Out 请求
   /// </summary>
-  public async Task<string> SendJobOutRequestAsync(string userName, string eqpName, string carrierName) {
+  public static async Task<string> SendJobOutRequestAsync(string userName, string eqpName, string carrierName) {
     return await SendJobRequestAsync(_jobOutUrl, userName, eqpName, carrierName);
   }
 
   /// <summary>
   /// 统一的作业请求发送方法
   /// </summary>
-  private async Task<string> SendJobRequestAsync(string url, string userName, string eqpName, string carrierName) {
+  private static async Task<string> SendJobRequestAsync(string url, string userName, string eqpName, string carrierName) {
     var requestData = new {
       userName,
       eqpName,

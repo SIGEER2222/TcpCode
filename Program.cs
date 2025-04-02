@@ -1,21 +1,190 @@
-using System;
-using System.Threading.Tasks;
 using Serilog;
+using SqlSugar;
+using System;
+using System.Collections.Generic;
+using System.Net;
+using System.Net.Sockets;
+using System.Reactive.Concurrency;
+using System.Reactive.Linq;
+using System.Reactive.Subjects;
+using System.Text;
+using System.Threading.Tasks;
 
-namespace RxTcpServer
-{
-    class Program
-    {
-        static async Task Main(string[] args)
-        {
-            Log.Logger = new LoggerConfiguration()
-                .WriteTo.Console()
-                .WriteTo.File("logs/TcpServerLog.log")
-                .WriteTo.Debug()
-                .CreateLogger();
+class Program {
+  static void Main() {
+    Log.Logger = new LoggerConfiguration()
+        .WriteTo.Console()
+        .WriteTo.File("logs/TcpServerLog.log")
+        .WriteTo.Debug()
+        .CreateLogger();
 
-            var server = new TcpServer(8080);
-            await server.StartAsync();
-        }
+    var messageProcessor = new MessageProcessor();
+    messageProcessor.StartProcessing();
+
+    var tcpServer = new TcpServer(messageProcessor);
+    tcpServer.Start();
+
+    Console.ReadLine(); // Keep the server running
+  }
+}
+
+public class TcpServer {
+  private readonly TcpListener tcpListener;
+  private readonly MessageProcessor messageProcessor;
+
+  public TcpServer(MessageProcessor messageProcessor) {
+    this.messageProcessor = messageProcessor;
+    this.tcpListener = new TcpListener(IPAddress.Any, 8080);
+  }
+
+  public void Start() {
+    tcpListener.Start();
+    Log.Information("TCP Server started on port 8080.");
+    AcceptClientsAsync();
+  }
+
+  private async void AcceptClientsAsync() {
+    while (true) {
+      var tcpClient = await tcpListener.AcceptTcpClientAsync();
+      Log.Information("Client connected: {0}", tcpClient.Client.RemoteEndPoint);
+
+      // Process the client connection in a separate task
+      _ = Task.Run(() => HandleClientAsync(tcpClient));
     }
+  }
+
+  private async Task HandleClientAsync(TcpClient tcpClient) {
+    using (tcpClient) {
+      var stream = tcpClient.GetStream();
+      var buffer = new byte[1024];
+      int bytesRead;
+
+      while ((bytesRead = await stream.ReadAsync(buffer, 0, buffer.Length)) > 0) {
+        var message = Encoding.UTF8.GetString(buffer, 0, bytesRead).Trim();
+        var clientId = tcpClient.Client.RemoteEndPoint.ToString(); // Use remote IP as clientId
+        Log.Information("Received message from {0}: {1}", clientId, message);
+
+        // Pass the message to the message processor
+        messageProcessor.ReceiveMessage(clientId, message);
+      }
+    }
+  }
+}
+
+public class MessageProcessor {
+  private static readonly ReplaySubject<(string clientId, string message)> messageStream = new(1);
+  private readonly IClientJobService clientJobService;
+
+  public MessageProcessor() {
+    clientJobService = new ClientJobService();
+  }
+
+  public void StartProcessing() {
+    messageStream
+        .Where(data => !string.IsNullOrEmpty(data.clientId) && !string.IsNullOrEmpty(data.message))
+        .GroupBy(data => data.clientId)
+        .Catch<IGroupedObservable<string, (string clientId, string message)>, Exception>(ex => {
+          Log.Error($"[Fatal Error] GroupBy 发生异常: {ex.Message}");
+          return Observable.Empty<IGroupedObservable<string, (string clientId, string message)>>();
+        })
+        .Subscribe(
+            group => {
+              group
+                      .DistinctUntilChanged(data => data.message)
+                      .ObserveOn(TaskPoolScheduler.Default)
+                      .Subscribe(async data => await ProcessClientMessage(group.Key, data.clientId, data.message),
+                          ex => Log.Error($"[Error] 处理客户端 {group.Key} 失败: {ex.Message}")
+                      );
+            },
+            ex => Log.Error($"[Fatal Error] 发生未处理的异常: {ex.Message}")
+        );
+  }
+
+  // This method is called when a new message is received from a client
+  public void ReceiveMessage(string clientId, string message) {
+    messageStream.OnNext((clientId, message));
+  }
+
+  private async Task ProcessClientMessage(string groupKey, string clientId, string code) {
+    var clientJob = clientJobService.GetClientJob(clientId);
+    if (clientJob == null) {
+      Log.Error("未找到匹配的客户端配置：[IP: {IP}] [当前消息: {Message}]", clientId, code);
+      return;
+    }
+
+    var db = SqlSugarHelp.Db;
+    var barCodeLog = new BarcodeScannerLog() {
+      IP = clientId,
+      Code = code,
+    };
+
+    if (DataProcessor.IsSpecificTextFormat(code)) {
+      var carrierName = code;
+      foreach (var job in clientJob) {
+        if (job.Type == JobType.In) {
+          var massage = await EapJobService.SendJobInRequestAsync(job.Code, carrierName);
+          barCodeLog.JobType = JobType.In;
+          barCodeLog.Message = massage;
+        }
+        else if (job.Type == JobType.Out) {
+          var massage = await EapJobService.SendJobOutRequestAsync(job.Code, carrierName);
+          barCodeLog.JobType = JobType.Out;
+          barCodeLog.Message = massage;
+        }
+      }
+    }
+    else {
+      Log.Error("处理消息: [IP: {IP}] [当前消息: {Message}]", clientId, code);
+    }
+
+   await db.Insertable(barCodeLog).SplitTable()
+    .ExecuteReturnSnowflakeIdListAsync();
+  }
+}
+
+public interface IClientJobService {
+  List<ClientJob> GetClientJob(string clientId);
+}
+
+public class ClientJobService : IClientJobService {
+  private static readonly Dictionary<string, List<ClientJob>> clientJobMappings = new()
+   {
+        { "10.10.0.101", new List<ClientJob> { new ClientJob("MCT-SC-A-0038", JobType.In) } },
+        { "10.10.0.102", new List<ClientJob> { new ClientJob("MCT-SC-A-0038", JobType.Out) } },
+        { "10.10.0.103", new List<ClientJob> { new ClientJob("MCT-SC-A-0039", JobType.In) } },
+        { "10.10.0.104", new List<ClientJob> { new ClientJob("MCT-SC-A-0039", JobType.Out),
+          new ClientJob("MCT-SC-A-0040", JobType.In) } },
+        { "10.10.0.105", new List<ClientJob> { new ClientJob("MCT-SC-A-0040", JobType.Out),
+          new ClientJob("MCT-SC-A-0041", JobType.In) } },
+        { "10.10.0.106", new List<ClientJob> { new ClientJob("MCT-SC-A-0041", JobType.Out),
+          new ClientJob("MCT-SC-A-0042", JobType.In) } },
+        { "10.10.0.108", new List<ClientJob> { new ClientJob("MCT-SC-A-0042", JobType.Out) } },
+        { "10.10.0.109", new List<ClientJob> { new ClientJob("MCT-SC-A-0043", JobType.In) } },
+        { "10.10.0.110", new List<ClientJob> { new ClientJob("MCT-SC-A-0043", JobType.Out),
+          new ClientJob("MCT-SC-A-0044", JobType.In) } },
+        { "10.10.0.111", new List<ClientJob> { new ClientJob("MCT-SC-A-0044", JobType.Out) } },
+        { "10.10.0.112", new List<ClientJob> { new ClientJob("MCT-SC-A-0045", JobType.In) } },
+        { "10.10.0.107", new List<ClientJob> { new ClientJob("MCT-SC-A-0045", JobType.Out),
+          new ClientJob("MCT-SC-A-0046", JobType.In) } },
+        { "10.10.0.113", new List<ClientJob> { new ClientJob("MCT-SC-A-0046", JobType.Out) } }
+    };
+
+  public List<ClientJob> GetClientJob(string clientId) {
+    return clientJobMappings.ContainsKey(clientId) ? clientJobMappings[clientId] : null;
+  }
+}
+
+public class ClientJob {
+  public string Code { get; }
+  public JobType Type { get; }
+
+  public ClientJob(string code, JobType type) {
+    Code = code;
+    Type = type;
+  }
+}
+
+public enum JobType {
+  In,
+  Out
 }
