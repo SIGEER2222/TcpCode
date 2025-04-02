@@ -29,13 +29,20 @@ public static partial class SqlSugarHelp {
 public class BarcodeScannerLog {
   [SugarColumn(IsPrimaryKey = true)]
   public long Id { get; set; }
+
   public string IP { get; set; }
-  [SugarColumn(IsNullable = true)]
+
+  [SugarColumn(IsNullable = true, ColumnDataType = "TEXT")]
   public string Message { get; set; }
-  [SugarColumn(IsNullable = true)]
+
+  [SugarColumn(IsNullable = true, ColumnDataType = "TEXT")]
   public string Code { get; set; }
+  [SugarColumn(IsNullable = true, ColumnDataType = "TEXT")]
+  public string EqpName { get; set; }
+
   [SplitField]
   public DateTime LogTime { get; set; }
+
   [SugarColumn(IsNullable = true)]
   public JobType JobType { get; set; }
 }

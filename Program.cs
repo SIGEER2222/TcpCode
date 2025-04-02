@@ -2,6 +2,7 @@ using Serilog;
 using SqlSugar;
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Net;
 using System.Net.Sockets;
 using System.Reactive.Concurrency;
@@ -17,6 +18,9 @@ class Program {
         .WriteTo.File("logs/TcpServerLog.log")
         .WriteTo.Debug()
         .CreateLogger();
+
+    var db = SqlSugarHelp.Db;
+    db.Queryable<BarcodeScannerLog>().SplitTable().ToList();
 
     var messageProcessor = new MessageProcessor();
     messageProcessor.StartProcessing();
@@ -81,7 +85,14 @@ public class MessageProcessor {
 
   public void StartProcessing() {
     messageStream
-        .Where(data => !string.IsNullOrEmpty(data.clientId) && !string.IsNullOrEmpty(data.message))
+        .Where(data => !string.IsNullOrEmpty(data.clientId)
+        && !string.IsNullOrEmpty(data.message)
+        && DataProcessor.IsSpecificTextFormat(data.message))
+         .SelectMany(data =>
+        {
+            var messages = data.message.Split(new[] { "\r\n" }, StringSplitOptions.RemoveEmptyEntries);
+            return messages.Select(message => (data.clientId, message.Trim()));
+        })
         .GroupBy(data => data.clientId)
         .Catch<IGroupedObservable<string, (string clientId, string message)>, Exception>(ex => {
           Log.Error($"[Fatal Error] GroupBy 发生异常: {ex.Message}");
@@ -90,11 +101,11 @@ public class MessageProcessor {
         .Subscribe(
             group => {
               group
-                      .DistinctUntilChanged(data => data.message)
-                      .ObserveOn(TaskPoolScheduler.Default)
-                      .Subscribe(async data => await ProcessClientMessage(group.Key, data.clientId, data.message),
-                          ex => Log.Error($"[Error] 处理客户端 {group.Key} 失败: {ex.Message}")
-                      );
+                .DistinctUntilChanged(data => data.message)
+                .ObserveOn(TaskPoolScheduler.Default)
+                .Subscribe(async data => await ProcessClientMessage(group.Key, data.clientId.Split(":")?.First(), data.message),
+                    ex => Log.Error($"[Error] 处理客户端 {group.Key} 失败: {ex.Message}")
+                );
             },
             ex => Log.Error($"[Fatal Error] 发生未处理的异常: {ex.Message}")
         );
@@ -105,14 +116,19 @@ public class MessageProcessor {
     messageStream.OnNext((clientId, message));
   }
 
+  // 异步处理客户端消息
   private async Task ProcessClientMessage(string groupKey, string clientId, string code) {
+    // 获取客户端任务
     var clientJob = clientJobService.GetClientJob(clientId);
+    // 如果没有找到匹配的客户端配置，则记录错误日志并返回
     if (clientJob == null) {
       Log.Error("未找到匹配的客户端配置：[IP: {IP}] [当前消息: {Message}]", clientId, code);
       return;
     }
 
+    // 获取数据库连接
     var db = SqlSugarHelp.Db;
+    // 创建条码扫描日志对象
     var barCodeLog = new BarcodeScannerLog() {
       IP = clientId,
       Code = code,
@@ -121,7 +137,9 @@ public class MessageProcessor {
     if (DataProcessor.IsSpecificTextFormat(code)) {
       var carrierName = code;
       foreach (var job in clientJob) {
+        barCodeLog.LogTime = DateTime.Now;
         if (job.Type == JobType.In) {
+          Log.Information($"处理消息: [IP: {clientId}] [当前消息: {code}] 执行动作: [In] ");
           var massage = await EapJobService.SendJobInRequestAsync(job.Code, carrierName);
           barCodeLog.JobType = JobType.In;
           barCodeLog.Message = massage;
@@ -130,15 +148,17 @@ public class MessageProcessor {
           var massage = await EapJobService.SendJobOutRequestAsync(job.Code, carrierName);
           barCodeLog.JobType = JobType.Out;
           barCodeLog.Message = massage;
+          Log.Information($"处理消息: [IP: {clientId}] [当前消息: {code}] 执行动作: [Out] ");
         }
+        barCodeLog.EqpName = job.Code;
+        await db.Insertable(barCodeLog).SplitTable()
+          .ExecuteReturnSnowflakeIdListAsync();
       }
     }
+    // 如果消息格式不符合特定格式，则记录错误日志
     else {
       Log.Error("处理消息: [IP: {IP}] [当前消息: {Message}]", clientId, code);
     }
-
-   await db.Insertable(barCodeLog).SplitTable()
-    .ExecuteReturnSnowflakeIdListAsync();
   }
 }
 
@@ -170,6 +190,7 @@ public class ClientJobService : IClientJobService {
     };
 
   public List<ClientJob> GetClientJob(string clientId) {
+    clientId = clientId.Split(":")?.First();
     return clientJobMappings.ContainsKey(clientId) ? clientJobMappings[clientId] : null;
   }
 }
