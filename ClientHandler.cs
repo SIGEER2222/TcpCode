@@ -1,82 +1,87 @@
-using System;
+using Serilog;
+using System.Collections.Concurrent;
 using System.IO;
 using System.Net.Sockets;
-using System.Reactive.Linq;
+using System.Reactive.Subjects;
 using System.Threading.Tasks;
-using Serilog;
+using System;
 
-namespace RxTcpServer
-{
-    public class ClientHandler
-    {
-        private readonly TcpClient _client;
-        private readonly string _clientEndPoint;
+public class ClientHandler {
+  private readonly TcpClient _client;
+  private readonly string _clientEndPoint;
+  private readonly Subject<string> _messageSubject;
 
-        public ClientHandler(TcpClient client)
-        {
-            _client = client;
-            _clientEndPoint = client.Client.RemoteEndPoint.ToString();
-        }
+  // 静态字典，用于跟踪13个扫码枪的 Subject
+  private static readonly ConcurrentDictionary<string, Subject<string>> ClientSubjects
+      = new ConcurrentDictionary<string, Subject<string>>();
+  private const int MaxClients = 13; // 限制为13个扫码枪
 
-        public async Task HandleClientAsync()
-        {
-            Log.Information("客户端已连接：{ClientIP}", _clientEndPoint);
+  public ClientHandler(TcpClient client) {
+    _client = client;
+    _clientEndPoint = client.Client.RemoteEndPoint.ToString();
+    _messageSubject = GetOrCreateSubject(_clientEndPoint);
+  }
 
-            using var stream = _client.GetStream();
-            using var reader = new StreamReader(stream);
-
-            var messageObservable = Observable.Create<string>(async observer =>
-            {
-                try
-                {
-                    while (_client.Connected)
-                    {
-                        var line = await reader.ReadLineAsync();
-                        if (line == null) break;
-                        observer.OnNext(line);
-                    }
-                    observer.OnCompleted();
-                }
-                catch (Exception ex)
-                {
-                    observer.OnError(ex);
-                }
-            });
-
-            messageObservable
-                .Subscribe(async message =>
-                {
-                    // 获取上次消息
-                    string lastMessage = IPTracker.GetLastMessage(_clientEndPoint);
-
-                    if (lastMessage == null || lastMessage != message)
-                    {
-                        // 更新 IPTracker，缓存新的消息
-                        IPTracker.Update(_clientEndPoint, message);
-
-                        // 传递封装的 ClientMessage
-                        var clientMessage = new ClientMessage(_clientEndPoint, message, lastMessage);
-                       await MessageProcessor.Process(clientMessage);
-
-                        // 记录日志
-                        Log.Information("来自 {ClientIP} 的消息：{Message}", _clientEndPoint, message);
-                    }
-                },
-                ex =>
-                {
-                    Log.Error(ex, "处理客户端 {ClientIP} 消息时发生异常", _clientEndPoint);
-                },
-                () =>
-                {
-                    Log.Information("客户端已断开：{ClientIP}", _clientEndPoint);
-                    _client.Close();
-                    IPTracker.Remove(_clientEndPoint);
-                });
-
-            while (_client.Connected)
-            {
-                await Task.Delay(100);
-            }
-        }
+  private Subject<string> GetOrCreateSubject(string ip) {
+    if (ClientSubjects.Count >= MaxClients && !ClientSubjects.ContainsKey(ip)) {
+      Log.Warning("已达到最大扫码枪数量（{MaxClients}），拒绝新连接：{IP}", MaxClients, ip);
+      _client.Close();
+      throw new InvalidOperationException($"已达到最大扫码枪数量限制（{MaxClients}个IP）");
     }
+
+    return ClientSubjects.GetOrAdd(ip, _ =>
+    {
+      var subject = new Subject<string>();
+      SubscribeToSubject(subject, ip); // 为新Subject设置订阅
+      return subject;
+    });
+  }
+
+  private void SubscribeToSubject(Subject<string> subject, string ip) {
+    subject
+        //.DistinctUntilChanged() // 只关心变化的消息
+        .Subscribe(
+            message => {
+              Log.Information("来自扫码枪 {ClientIP} 的新消息：{Message}", ip, message);
+              // 这里可以添加额外的消息处理逻辑，例如：
+              // var clientMessage = new ClientMessage(ip, message, IPTracker.GetLastMessage(ip));
+              // IPTracker.Update(ip, message);
+              // await MessageProcessor.Process(clientMessage);
+            },
+            ex => Log.Error(ex, "处理扫码枪 {ClientIP} 消息时发生异常", ip),
+            () => {
+              Log.Information("扫码枪已断开：{ClientIP}", ip);
+              if (ClientSubjects.TryRemove(ip, out var removedSubject)) {
+                removedSubject.Dispose();
+              }
+            });
+  }
+
+  public async Task HandleClientAsync() {
+    Log.Information("扫码枪已连接：{ClientIP}", _clientEndPoint);
+
+    try {
+      using var stream = _client.GetStream();
+      using var reader = new StreamReader(stream);
+
+      string line;
+      while ((line = await reader.ReadLineAsync()) != null) {
+        _messageSubject.OnNext(line);
+      }
+      _messageSubject.OnCompleted();
+    }
+    catch (Exception ex) {
+      Log.Error(ex, "处理扫码枪 {ClientIP} 时发生异常", _clientEndPoint);
+      _messageSubject.OnError(ex);
+    }
+    finally {
+      if (_client.Connected) {
+        _client.Close();
+      }
+    }
+  }
+
+  public static int GetConnectedClientCount() {
+    return ClientSubjects.Count;
+  }
 }
