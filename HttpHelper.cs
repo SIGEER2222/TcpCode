@@ -53,6 +53,9 @@ public static class HttpHelper {
 /// </summary>
 public static class EapJobService {
   private static readonly string _jobInUrl = "http://10.10.4.203:31000/operation/api/app/eap-operation/e-aP_Job-prep_Job-in_Check";
+  public static readonly string _reposition = "http://10.10.4.203:31000/operation/api/app/eap-operation/hmi-req-reposition-step";
+  public static readonly string _removeCarrier = "http://10.10.4.203:31000/operation/api/app/eap-operation/eap-remove-carrier";
+  public static readonly string _startLot = "http://10.10.4.203:31000/operation/app/eap-operation/hmi-req-start-lot-by-carrier";
   private static readonly string _jobOutUrl = "http://10.10.4.203:31000/operation/api/app/eap-operation/e-aP_Job-prep_Job-out_Check";
 
   public static async Task<string> SendJobInRequestAsync(string eqpName, string carrierName) {

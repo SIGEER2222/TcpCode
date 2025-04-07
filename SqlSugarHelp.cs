@@ -1,6 +1,4 @@
 using Serilog;
-using Serilog.Core;
-using Serilog.Events;
 using SqlSugar;
 using System;
 
@@ -24,6 +22,7 @@ public static partial class SqlSugarHelp {
     };
   });
 }
+
 [SplitTable(SplitType.Season)]
 [SugarTable("fab_Barcode_Scanner_Log_{year}{month}{day}")]
 public class BarcodeScannerLog {
@@ -31,13 +30,16 @@ public class BarcodeScannerLog {
   public long Id { get; set; }
 
   public string IP { get; set; }
+  [SugarColumn(IsNullable = true)]
+  public string RequestURL { get; set; }
 
-  [SugarColumn(IsNullable = true, ColumnDataType = "TEXT")]
+  [SugarColumn(IsNullable = true, ColumnDataType = "longtext,text,clob")]
   public string Message { get; set; }
 
-  [SugarColumn(IsNullable = true, ColumnDataType = "TEXT")]
+  [SugarColumn(IsNullable = true, ColumnDataType = "longtext,text,clob")]
   public string Code { get; set; }
-  [SugarColumn(IsNullable = true, ColumnDataType = "TEXT")]
+
+  [SugarColumn(IsNullable = true)]
   public string EqpName { get; set; }
 
   [SplitField]

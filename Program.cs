@@ -1,5 +1,6 @@
 using Serilog;
 using SqlSugar;
+using SqlSugar.SplitTableExtensions;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -12,21 +13,28 @@ using System.Text;
 using System.Threading.Tasks;
 
 class Program {
-  static void Main() {
+  static async Task Main() {
     Log.Logger = new LoggerConfiguration()
         .WriteTo.Console()
         .WriteTo.File("logs/TcpServerLog.log")
         .WriteTo.Debug()
         .CreateLogger();
 
+
     var db = SqlSugarHelp.Db;
+    db.CodeFirst.SplitTables().InitTables(typeof(BarcodeScannerLog));
+
     db.Queryable<BarcodeScannerLog>().SplitTable().ToList();
 
     var messageProcessor = new MessageProcessor();
+
     messageProcessor.StartProcessing();
 
     var tcpServer = new TcpServer(messageProcessor);
     tcpServer.Start();
+    // await messageProcessor.ProcessClientMessage("10.10.0.113", "300301-0001-022");
+
+    await Task.CompletedTask;
 
     Console.ReadLine(); // Keep the server running
   }
@@ -88,11 +96,10 @@ public class MessageProcessor {
         .Where(data => !string.IsNullOrEmpty(data.clientId)
         && !string.IsNullOrEmpty(data.message)
         && DataProcessor.IsSpecificTextFormat(data.message))
-         .SelectMany(data =>
-        {
-            var messages = data.message.Split(new[] { "\r\n" }, StringSplitOptions.RemoveEmptyEntries);
-            return messages.Select(message => (data.clientId, message.Trim()));
-        })
+         .SelectMany(data => {
+           var messages = data.message.Split(new[] { "\r\n" }, StringSplitOptions.RemoveEmptyEntries);
+           return messages.Select(message => (data.clientId, message.Trim()));
+         })
         .GroupBy(data => data.clientId)
         .Catch<IGroupedObservable<string, (string clientId, string message)>, Exception>(ex => {
           Log.Error($"[Fatal Error] GroupBy 发生异常: {ex.Message}");
@@ -103,7 +110,7 @@ public class MessageProcessor {
               group
                 .DistinctUntilChanged(data => data.message)
                 .ObserveOn(TaskPoolScheduler.Default)
-                .Subscribe(async data => await ProcessClientMessage(group.Key, data.clientId.Split(":")?.First(), data.message),
+                .Subscribe(async data => await ProcessClientMessage(data.clientId.Split(":")?.First(), data.message),
                     ex => Log.Error($"[Error] 处理客户端 {group.Key} 失败: {ex.Message}")
                 );
             },
@@ -117,7 +124,7 @@ public class MessageProcessor {
   }
 
   // 异步处理客户端消息
-  private async Task ProcessClientMessage(string groupKey, string clientId, string code) {
+  public async Task ProcessClientMessage( string clientId, string code) {
     // 获取客户端任务
     var clientJob = clientJobService.GetClientJob(clientId);
     // 如果没有找到匹配的客户端配置，则记录错误日志并返回
@@ -134,23 +141,25 @@ public class MessageProcessor {
       Code = code,
     };
 
+    await DoWhenLastStep(clientId, code);
+
     if (DataProcessor.IsSpecificTextFormat(code)) {
       var carrierName = code;
       foreach (var job in clientJob) {
         barCodeLog.LogTime = DateTime.Now;
         if (job.Type == JobType.In) {
           Log.Information($"处理消息: [IP: {clientId}] [当前消息: {code}] 执行动作: [In] ");
-          var massage = await EapJobService.SendJobInRequestAsync(job.Code, carrierName);
+          var massage = await EapJobService.SendJobInRequestAsync(job.EqpName, carrierName);
           barCodeLog.JobType = JobType.In;
           barCodeLog.Message = massage;
         }
         else if (job.Type == JobType.Out) {
-          var massage = await EapJobService.SendJobOutRequestAsync(job.Code, carrierName);
+          var massage = await EapJobService.SendJobOutRequestAsync(job.EqpName, carrierName);
           barCodeLog.JobType = JobType.Out;
           barCodeLog.Message = massage;
           Log.Information($"处理消息: [IP: {clientId}] [当前消息: {code}] 执行动作: [Out] ");
         }
-        barCodeLog.EqpName = job.Code;
+        barCodeLog.EqpName = job.EqpName;
         await db.Insertable(barCodeLog).SplitTable()
           .ExecuteReturnSnowflakeIdListAsync();
       }
@@ -158,6 +167,47 @@ public class MessageProcessor {
     // 如果消息格式不符合特定格式，则记录错误日志
     else {
       Log.Error("处理消息: [IP: {IP}] [当前消息: {Message}]", clientId, code);
+    }
+  }
+
+  // 异步方法，用于执行第一步
+  public async Task DoWhenLastStep(string clientId, string code) {
+    // 如果客户端ID为"10.10.0.101"
+    if (clientId.Contains("10.10.0.113")) {
+
+      Log.Information($"处理消息: [IP: {clientId}] [当前消息: {code}] 执行动作: [LastStep] ");
+      var db = SqlSugarHelp.Db;
+
+      // 定义一个匿名对象，包含用户名、步骤序列、承运商名称和产品名称
+      var reposition = new {
+        UserName = "SYSTEM",
+        StepSeq = "010.090",
+        CarrierName = code,
+        productName = "MA5",
+      };
+
+      var repositionMsg = await HttpHelper.PostJsonAsync(EapJobService._reposition, reposition);
+
+      await db.Insertable(new BarcodeScannerLog {
+        IP = clientId,
+        Code = code,
+        LogTime = DateTime.Now,
+        EqpName = "MCT-SC-A-0046",
+        Message = repositionMsg,
+      }).SplitTable()
+      .ExecuteReturnSnowflakeIdListAsync();
+
+      var removeCarrier =  await HttpHelper.PostJsonAsync(EapJobService._removeCarrier, reposition);
+
+       await db.Insertable(new BarcodeScannerLog {
+        IP = clientId,
+        Code = code,
+        LogTime = DateTime.Now,
+        EqpName = "MCT-SC-A-0046",
+        Message = removeCarrier,
+      }).SplitTable()
+      .ExecuteReturnSnowflakeIdListAsync();
+      // await HttpHelper.PostJsonAsync(@"http://10.10.8.59:8080/app/eap-operation/hmi-req-start-lot-by-carrier", reposition);
     }
   }
 }
@@ -196,11 +246,11 @@ public class ClientJobService : IClientJobService {
 }
 
 public class ClientJob {
-  public string Code { get; }
+  public string EqpName { get; }
   public JobType Type { get; }
 
   public ClientJob(string code, JobType type) {
-    Code = code;
+    EqpName = code;
     Type = type;
   }
 }
